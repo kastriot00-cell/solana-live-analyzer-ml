@@ -1,82 +1,56 @@
 import * as tf from "@tensorflow/tfjs";
+import "@tensorflow/tfjs-storage";  // wichtig für localstorage-Modelle
 
 const STORAGE_KEY = "solana_ml_model_v1";
 const META_KEY = "solana_ml_meta_v1";
 
-// Feature builder: from an array of candles [{price, ...}] produce X (features) and y (label: next return sign)
-export function buildDataset(prices, indicators, window=24) {
+// Feature builder: from an array of candles [{price,...}] produce X (features) and y (label: next return sign)
+export function buildDataset(prices, indicators, window = 24) {
   if (!prices || prices.length < window + 2) return null;
   const X = [];
   const y = [];
+
   for (let i = window; i < prices.length - 1; i++) {
-    const slice = prices.slice(i - window, i + 1); // window+1 points
-    const px = slice.map(v => v);
-    const ret = (prices[i+1] - prices[i]) / prices[i]; // next return
+    const slice = prices.slice(i - window, i + 1);
+    const px = slice.map(v => v.price);
+    const ret = (prices[i + 1].price - prices[i].price) / prices[i].price; // next return
     const label = ret > 0 ? 1 : 0;
 
-    // simple features: normalized prices in window, last RSI/MA/MACD
-    const lastInd = indicators[i] || { rsi: 50, ma20: prices[i], ma50: prices[i], macd: 0 };
+    const lastInd = indicators[i];
     const feats = [
-      ...normalize(px),
-      lastInd.rsi/100,
-      (lastInd.ma20 || prices[i]) / prices[i],
-      (lastInd.ma50 || prices[i]) / prices[i],
-      (lastInd.macd || 0)
+      normalize(px),
+      lastInd.rsi || 0,
+      lastInd.ma20 || prices[i].price,
+      lastInd.ma50 || prices[i].price,
+      lastInd.macd || 0
     ];
-    X.push(feats);
+    X.push(feats.flat());
     y.push(label);
   }
-  return { X, y };
+
+  return { X: tf.tensor2d(X), y: tf.tensor1d(y, "int32") };
 }
 
 function normalize(arr) {
-  const last = arr[arr.length - 1];
-  return arr.map(v => (v / last) - 1); // relative to last price
+  const min = Math.min(...arr);
+  const max = Math.max(...arr);
+  return arr.map(v => (v - min) / (max - min + 1e-6));
 }
 
-export function buildModel(inputDim) {
-  const m = tf.sequential();
-  m.add(tf.layers.dense({ units: 64, activation: "relu", inputShape: [inputDim] }));
-  m.add(tf.layers.dropout({ rate: 0.2 }));
-  m.add(tf.layers.dense({ units: 32, activation: "relu" }));
-  m.add(tf.layers.dropout({ rate: 0.2 }));
-  m.add(tf.layers.dense({ units: 1, activation: "sigmoid" })); // probability up
-  m.compile({ optimizer: tf.train.adam(0.001), loss: "binaryCrossentropy", metrics: ["accuracy"] });
-  return m;
+// Model speichern
+export async function saveModel(model, meta = {}) {
+  await model.save(`localstorage://${STORAGE_KEY}`);
+  localStorage.setItem(META_KEY, JSON.stringify(meta));
 }
 
-export async function trainOrUpdate(model, X, y, epochs=8, batchSize=32) {
-  const xs = tf.tensor2d(X);
-  const ys = tf.tensor2d(y, [y.length, 1]);
-  const hist = await model.fit(xs, ys, { epochs, batchSize, verbose: 0, shuffle: true });
-  xs.dispose(); ys.dispose();
-  return hist.history;
-}
-
-export async function predictProba(model, feat) {
-  const x = tf.tensor2d([feat]);
-  const p = model.predict(x);
-  const data = await p.data();
-  x.dispose(); p.dispose();
-  return data[0]; // probability of "up"
-}
-
-export async function saveModel(model, meta) {
-  try {
-    await model.save(tf.io.browserLocalStorage(STORAGE_KEY));
-    localStorage.setItem(META_KEY, JSON.stringify(meta));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
+// Model laden
 export async function loadModel() {
   try {
-    const m = await tf.loadLayersModel(tf.io.browserLocalStorage(STORAGE_KEY));
-    const meta = JSON.parse(localStorage.getItem(META_KEY) || "{}");
-    return { model: m, meta };
-  } catch {
-    return { model: null, meta: {} };
+    const model = await tf.loadLayersModel(`localstorage://${STORAGE_KEY}`);
+    const meta = JSON.parse(localStorage.getItem(META_KEY)) || {};
+    return { model, meta };
+  } catch (err) {
+    console.warn("Kein gespeichertes Modell gefunden:", err.message);
+    return null;
   }
 }
